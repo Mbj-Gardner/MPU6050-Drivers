@@ -61,11 +61,12 @@
 #include "./inc/ST7735.h"
 /* Add whatever else you need here! */
 #include "./lib/RGB/RGB.h"
-
+#include <math.h>
 //#include "TM4C123GH6PM.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#define RAD_2_DEG           57.29578
 #define XG_OFFS_TC          0x00
 #define YG_OFFS_TC          0x01
 #define ZG_OFFS_TC          0x02
@@ -178,15 +179,22 @@
 #define WHO_AM_I            0x75
 void I2C3_Init(void);
 char I2C3_Wr(int slaveAddr, char memAddr, char data);
-char I2C3_Rd(int slaveAddr, char memAddr, int byteCount, char* data);
+char I2C3_Rd(int slaveAddr, char memAddr, int byteCount, uint8_t* data);
 void Delay(unsigned long counter);
 void uart5_init(void);
 void UART5_Transmitter(unsigned char data);
+void calibirate_MPU6050(int num_iterations);
 void printstring(char *str);
 void MPU6050_Init(void);
-
+char setOffsets(int slaveAddr, char memAddr, int8_t data);
+void read_MPU6050(void);
 char msg[20];
-
+int16_t accX, accY, accZ, GyroX, GyroY, GyroZ, Temper;
+uint8_t sensordata[14];
+float AX, AY, AZ, t, GX, GY, GZ;
+static int16_t offset_gyx = 0, offset_gyy = 0, offset_gyz = 0;
+float angleAccX; float angleAccY;
+float offset_angleAccX = 0, offset_angleAccY = 0;
 /* TODO: enable this for lab 4. */
 #define LAB_4 false
 
@@ -212,6 +220,11 @@ void DelayWait10ms(uint32_t n);
  * @brief Blocks the current process until PF4 (Left Button <=> SW1) is pressed.
  */
 void Pause(void);
+
+// float sgZ = accZ<0 ? -1 : 1; // allow one angle to go from -180 to +180 degrees
+//  double angleAccX =   atan2(accY, sgZsqrt(accZaccZ + accXaccX)) RAD_2_DEG; // [-180,+180] deg
+//  double angleAccY = - atan2(accX,     sqrt(accZaccZ + accYaccY)) * RAD_2_DEG; // [- 90,+ 90] deg
+
 
 /** Entry point. */
 int main(void) {
@@ -271,12 +284,13 @@ int main(void) {
           blynk_init("EE-IOT-Platform-03", "g!TyA>hR2JTy", "1234567890", USE_TIMER_INTERRUPT);
           #undef USE_TIMER_INTERRUPT
     #endif
-		 int  accX, accY, accZ, GyroX, GyroY, GyroZ, Temper; 
-	float AX, AY, AZ, t, GX, GY, GZ;
-	char sensordata[14];
+//	int16_t accX, accY, accZ, GyroX, GyroY, GyroZ, Temper;
+//uint8_t sensordata[14];
+//	float AX, AY, AZ, t, GX, GY, GZ;
 	I2C3_Init();
-	Delay(1000);
+	Delay(100);
 	MPU6050_Init();
+	calibirate_MPU6050(5000);
 	EnableInterrupts();
 	//Delay(1000);
   //uart5_init();
@@ -284,24 +298,23 @@ int main(void) {
 	ST7735_SetCursor(0, 0);
 	while(1)
 	{	 
- I2C3_Rd(0x68,ACCEL_XOUT_H, 14, sensordata);
- accX = (int) ( (sensordata[0] << 8 ) |sensordata[1] );
- accY = (int) ( (sensordata[2] << 8 ) |sensordata[3] );
- accZ = (int) ( (sensordata[4] << 8 ) |sensordata[5] );
- Temper = (int) ( (sensordata[6] << 8 ) |sensordata[7] );
- GyroX = (int) ( (sensordata[8] << 8 ) |sensordata[9] );
- GyroY = (int) ( (sensordata[10] << 8 ) |sensordata[11] );
- GyroZ = (int) ( (sensordata[12] << 8 ) |sensordata[13] );
- 
-		
-   // Convert The Readings
-  AX = (float)accX/16384.0;
-  AY = (float)accY/16384.0;
-  AZ = (float)accZ/16384.0;
-  GX = (float)GyroX/131.0;
-  GY = (float)GyroX/131.0;
-  GZ = (float)GyroX/131.0;
-  t = ((float)Temper/340.00)+36.53;
+		 read_MPU6050();
+			// account for offsets
+				GyroX -= offset_gyx;
+				GyroY -= offset_gyy;
+				GyroZ -= offset_gyz;
+			 // Convert The Readings
+			AX = (float)accX/16384.0;
+			AY = (float)accY/16384.0;
+			AZ = (float)accZ/16384.0;
+			GX = (float)GyroX/131.0 ;
+			GY = (float)GyroY/131.0 ;
+			GZ = (float)GyroZ/131.0;
+			float sgZ = accZ<0 ? -1 : 1; // allow one angle to go from -180 to +180 degrees
+		float angleAccX =   atan2(accY, sgZ*sqrt(accZ*accZ + accX*accX)) * RAD_2_DEG; // [-180,+180] deg
+		float angleAccY = - atan2(accX,     sqrt(accZ*accZ + accY*accY)) * RAD_2_DEG; // [- 90,+ 90] deg
+		 angleAccY -= offset_angleAccY;
+		angleAccX -= offset_angleAccX;
      printf("Gx = %.2f \n",GX);
     // printstring(msg);
 		 printf("Gy = %.2f \n",GY);
@@ -312,10 +325,13 @@ int main(void) {
     // printstring(msg);
 		 printf("Ay  = %.2f \n",AY);
      //printstring(msg);
-		 printf("Ax  = %.2f \r\n",AZ);
+		 printf("Az  = %.2f \r\n",AZ);
      //printstring(msg);
+		 printf("angleAccX  = %.2f \n",angleAccX);
+     //printstring(msg);
+		 printf("angleAccY  = %.2f \r\n",angleAccY);
 		
-     Delay(1000);
+     Delay(50);
 		 ST7735_FillScreen(ST7735_BLACK);
 		ST7735_SetCursor(0, 0);
 	}
@@ -349,9 +365,20 @@ void MPU6050_Init(void)
  I2C3_Wr(0x68,PWR_MGMT_1,  0x01);
  I2C3_Wr(0x68,CONFIG, 0x00);
  I2C3_Wr(0x68,ACCEL_CONFIG,0x00); 
- I2C3_Wr(0x68,GYRO_CONFIG,0x18);
+ I2C3_Wr(0x68,GYRO_CONFIG,0x00);
  I2C3_Wr(0x68,INT_ENABLE, 0x01);
-
+// setOffsets(0x68,XA_OFFS_H, (((-4738)) & 0xFF00) >> 8);
+// setOffsets(0x68,XA_OFFS_L_TC, (((-4738)) & 0x00FF));
+// setOffsets(0x68,YA_OFFS_H, (((-682)) & 0xFF00) >> 8);
+// setOffsets(0x68,YA_OFFS_L_TC, (((-682)) & 0x00FF));
+// setOffsets(0x68,ZA_OFFS_H, (((1184)) & 0xFF00) >> 8);
+// setOffsets(0x68,ZA_OFFS_L_TC, (((1184)) & 0x00FF));
+ setOffsets(0x68,XG_OFFS_USRH, 0x0);
+ setOffsets(0x68,XG_OFFS_USRL, (82));
+ setOffsets(0x68,YG_OFFS_USRH, 0x0);
+ setOffsets(0x68,YG_OFFS_USRL, (((32)) & 0x00FF));
+ setOffsets(0x68,ZG_OFFS_USRH, (((-20)) & 0xFF00) >> 8);
+ setOffsets(0x68,ZG_OFFS_USRL, (((-20)) & 0x00FF));
 }
 
 //void uart5_init(void)
@@ -430,7 +457,32 @@ char I2C3_Wr(int slaveAddr, char memAddr, char data)
 
     return 0;       /* no error */
 }
-char I2C3_Rd(int slaveAddr, char memAddr, int byteCount, char* data)
+
+char setOffsets(int slaveAddr, char memAddr, int8_t data)
+{
+		//I2C3_MCS_R &=  ~I2C_MCS_BUSBSY ; // fix reset bug
+    char error;
+
+    /* send slave address and starting address */
+	  I2C3_MSA_R   = (slaveAddr << 1)&0xFE; // MSA[7:1] slave addr
+		I2C3_MSA_R  &= ~0x01; // MSA[0] is 0 for send
+    I2C3_MDR_R   = memAddr;
+    I2C3_MCS_R   = (I2C_MCS_START | I2C_MCS_RUN);                      /* S-(saddr+w)-ACK-maddr-ACK */
+
+    error = I2C_wait_till_done();       /* wait until write is complete */
+    if (error) return error;
+
+    /* send data */
+    I2C3_MDR_R   = data;
+    I2C3_MCS_R   = (I2C_MCS_STOP | I2C_MCS_RUN);                      /* -data-ACK-P */
+    error = I2C_wait_till_done();       /* wait until write is complete */
+      while(I2C3_MCS_R   & 0x40);        /* wait until bus is not busy */
+     error = I2C3_MCS_R   & 0xE;
+    if (error) return error;
+
+    return 0;       /* no error */
+}
+char I2C3_Rd(int slaveAddr, char memAddr, int byteCount, uint8_t* data)
 {
      char error;
     
@@ -461,7 +513,7 @@ char I2C3_Rd(int slaveAddr, char memAddr, int byteCount, char* data)
 
     if (--byteCount == 0)           /* if single byte read, done */
     {
-        //while(I2C3_MCS_R   & 0x40);    /* wait until bus is not busy */
+        while(I2C3_MCS_R   & 0x40);    /* wait until bus is not busy */
         return 0;       /* no error */
     }
  
@@ -481,6 +533,46 @@ char I2C3_Rd(int slaveAddr, char memAddr, int byteCount, char* data)
     while(I2C3_MCS_R   & 0x40);        /* wait until bus is not busy */
     
     return 0;       /* no error */
+}
+
+void read_MPU6050(void){
+	I2C3_Rd(0x68,ACCEL_XOUT_H, 2, sensordata);
+ accX = ((int16_t) ( (sensordata[0] << 8 ) |sensordata[1] ));
+ memset(sensordata, 0, sizeof(sensordata)); 
+ I2C3_Rd(0x68,ACCEL_YOUT_H, 2, sensordata);
+ accY = ((int16_t) ( (sensordata[0] << 8 ) |sensordata[1] ));
+ memset(sensordata, 0, sizeof(sensordata)); 
+ I2C3_Rd(0x68,ACCEL_ZOUT_H, 2, sensordata);	
+ accZ = ((int16_t) ( (sensordata[0] << 8 ) |sensordata[1] ));
+ memset(sensordata, 0, sizeof(sensordata)); 
+ I2C3_Rd(0x68,GYRO_XOUT_H, 2, sensordata);
+ GyroX = ((int16_t) ( (sensordata[0] << 8 ) |sensordata[1] ));
+ memset(sensordata, 0, sizeof(sensordata)); 
+ I2C3_Rd(0x68,GYRO_YOUT_H, 2, sensordata);
+ GyroY = ((int16_t) ( (sensordata[0] << 8 ) |sensordata[1] ));
+ memset(sensordata, 0, sizeof(sensordata)); 
+ I2C3_Rd(0x68,GYRO_ZOUT_H, 2, sensordata);
+ GyroZ = ((int16_t) ( (sensordata[0] << 8 ) |sensordata[1] ));
+ 
+	
+}
+
+void calibirate_MPU6050(int num_iterations) {
+	for (int i = 0; i < num_iterations; i++) {
+    read_MPU6050();
+    offset_gyx += GyroX;
+    offset_gyy += GyroY;
+    offset_gyz += GyroZ;
+		float sgZ = accZ<0 ? -1 : 1; // allow one angle to go from -180 to +180 degrees
+		offset_angleAccX +=  atan2(accY, sgZ*sqrt(accZ*accZ + accX*accX)) * RAD_2_DEG;
+		offset_angleAccY +=  - atan2(accX,     sqrt(accZ*accZ + accY*accY)) * RAD_2_DEG;
+  }
+
+  offset_gyx /= num_iterations;
+  offset_gyy /= num_iterations;
+  offset_gyz /= num_iterations;
+	offset_angleAccX /= num_iterations;
+	offset_angleAccY /= num_iterations;
 }
 		
 //void UART5_Transmitter(unsigned char data)  
